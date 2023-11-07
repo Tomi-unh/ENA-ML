@@ -155,8 +155,8 @@ class DataProcessor:
     '''
     This function takes in an np.ndarray image data and extracts out regions in the data that are a certain threshold
     greater than the background pixels. The threshold is a constant value multiplied by the standard deviation of the 
-    image data. These regions are filtered based on the size (# of pixels in the region). A list of isolated regions of images 
-    is returned.
+    image data. These regions are filtered based on the size (# of pixels in the region).
+    A list of isolated regions of images is returned.
     
     Parameters:
       ----------
@@ -221,6 +221,9 @@ class DataProcessor:
     mlt = ((angle_rad + pi)*12)/pi
     
     return mlt
+  
+  
+  
     
   def Process_data(self):
     '''
@@ -275,6 +278,7 @@ class DataProcessor:
         
         extract_dict[key]['mlt'] = avg_mlt
         extract_dict[key]['image'] = extracted_region
+        
       with open(os.path.join(self.path, f'{self.station}_region_data.pkl'), 'wb') as f:
         pickle.dump(extract_dict, f)
   

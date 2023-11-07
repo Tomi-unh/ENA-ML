@@ -194,7 +194,7 @@ class TempModels:
   def region_model(self):
     """
     Build and compile a Keras neural network model for regression with concatenation of an array input,
-    Conv2D, and MaxPooling layers.
+    Conv2D, and MaxPooling layers. This model takes in the temperature maps along with
 
     Parameters:
       ---------- 
@@ -255,8 +255,44 @@ class TempModels:
     final_model.compile(optimizer=opt, loss= self.loss, metrics= self.metrics)
 
     return final_model
+  
+  
+  def Four_Quadrants(self):
+    '''
+    This model takes in four quadrants of the temperature maps as inputs instead of just one image like the temp_model below.
+    Using these images, a prediction of db/dt is made.
+    '''
     
+    model = Sequential()
+
+    model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape= (4,160,160,1), padding = 'same'))
+    model.add(BatchNormalization())
+    model.add(MaxPooling2D((2, 2)))
     
+    model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+    model.add(BatchNormalization())
+    model.add(MaxPooling2D((2, 2)))
+
+    model.add(Flatten())
+    model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+    model.add(Dense(10, activation='relu'))
+    model.add(Dense(1, activation='linear'))
+    
+    # Choose the Optimizer of choice
+    if self.optimizer == 'adam':
+        opt = Adam(learning_rate = self.learning_rate)
+        
+    elif self.optimizer == 'sgd':
+        opt = SGD(learning_rate = self.learning_rate, momentum = self.momentum)
+        
+    else:
+        raise ValueError(f"Unknown optimizer: {self.optimizer}")
+    
+    # compile model   
+    model.compile(optimizer= opt, loss=self.loss, metrics=self.metrics)
+    return model
+  
+   
   def temp_model(self):
     '''
     This function builds and compiles a simple Nueral Network model that takes in images as 
