@@ -132,14 +132,14 @@ class TempModels:
         while len(sublist) < max_length:
             sublist.append(fill_value)
   
-#        yield sublist
+
     return lst
             
   
   def prep_region_data(self):
     '''
-    Prepare the datasets. This opens the needed datafiles and converts the values into a suitable format for 
-    a Neural Network model and returns the cleaned up arrays. 
+    Prepare the datasets. This opens the isolated regions dictionary along with the 4 quadrants images
+    and converts the values into a suitable format for a Neural Network model and returns the cleaned up arrays. 
     
     Parameters:
       ----------
@@ -147,8 +147,9 @@ class TempModels:
       
       Return:
         --------
-        img_array, mlt_array: This returns the isolated region image arrays accompanied by 
-        their respective averaged mlt values.
+        img_array, mlt_array, quadrant_imgs, qudrant_mean: This returns the isolated region image arrays 
+        accompanied by their respective averaged mlt values. The qudrant images are also returned along with a list 
+        of its mean values.
     '''
     #import the data 
     filename = os.path.join(self.data_path,f'{self.station}_region_data.pkl')
@@ -186,7 +187,29 @@ class TempModels:
     mlt_array = np.array(mlt_ls, dtype = float)
     del mlt_ls
     
-    return img_array, mlt_array
+    #define the empty list for storing the mean values and the images
+    img_mean = []
+    quadrant_imgs = []
+    
+    #Load the 4 quadrant images for clean up
+    filename_imgs = os.path.join(self.data_path, f'{self.station}_pieslice_data.pkl')
+    
+    with open(filename_imgs, 'rb') as file_imgs:
+      data_imgs = pickle.load(file_imgs)
+    
+    
+    for key, subdict in data_imgs.items():
+      if 'mean' in subdict:
+        img_mean.append(subdict['mean'])
+      
+      if 'image' in subdict:
+        quadrant_imgs.append(subdict['image'])
+        
+    
+    img_mean_array = np.array(img_mean, dtype = float)
+    quadrant_img_array = np.array(quadrant_imgs, dytpe = float)
+    
+    return img_array, mlt_array, img_mean_array, quadrant_img_array
   
   
   
@@ -257,27 +280,57 @@ class TempModels:
     return final_model
   
   
+  
   def Four_Quadrants(self):
     '''
     This model takes in four quadrants of the temperature maps as inputs instead of just one image like the temp_model below.
     Using these images, a prediction of db/dt is made.
     '''
     
-    model = Sequential()
-
-    model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape= (4,160,160,1), padding = 'same'))
-    model.add(BatchNormalization())
-    model.add(MaxPooling2D((2, 2)))
+    # Define input layers for image and array inputs
+    quad_imgs = Input(shape = (4,160,160,1))
+    quad_mean = Input(shape=(4,))
     
-    model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-    model.add(BatchNormalization())
-    model.add(MaxPooling2D((2, 2)))
-
-    model.add(Flatten())
-    model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
-    model.add(Dense(10, activation='relu'))
-    model.add(Dense(1, activation='linear'))
+    log_array = np.log(quad_mean)
     
+    squared_array = quad_mean**2
+    
+    
+
+    # Convolutional Layer
+    conv_outputs = []
+    for i in range(self.input_dim[0]):
+      
+      x = Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform')(quad_imgs[:,i,:,:,:])
+      x = BatchNormalization()(x)  # Add BatchNormalization
+      x = MaxPooling2D((2, 2))(x)
+      
+      
+      #Add another layer of conv2d, maxpooling and batchnormalization
+      x = Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform')(x)
+      x = BatchNormalization()(x)  
+      x = MaxPooling2D((2, 2))(x)
+  
+      # Flatten the convolutional output
+      x = Flatten()(x)
+      conv_outputs.append(x)
+    
+    #concatenate the flattened images together 
+    conv_concat = Concatenate()(conv_outputs)
+    
+    # Concatenate the flattened images and array inputs
+    concatenated_inputs = Concatenate()([conv_concat, quad_mean, log_array, squared_array])
+
+    # Create the model architecture
+    for units in self.hidden_layers:
+        concatenated_inputs = Dense(units, activation='relu')(concatenated_inputs)
+
+    # Output layer for regression
+    output_layer = Dense(1, activation='linear')(concatenated_inputs)
+
+    # Create the final model with inputs and output
+    final_model = Model(inputs=[quad_imgs, quad_mean], outputs=output_layer)
+
     # Choose the Optimizer of choice
     if self.optimizer == 'adam':
         opt = Adam(learning_rate = self.learning_rate)
@@ -287,10 +340,13 @@ class TempModels:
         
     else:
         raise ValueError(f"Unknown optimizer: {self.optimizer}")
-    
-    # compile model   
-    model.compile(optimizer= opt, loss=self.loss, metrics=self.metrics)
-    return model
+        
+    #Compile the model.    
+    final_model.compile(optimizer=opt, loss= self.loss, metrics= self.metrics)
+
+    return final_model
+  
+  
   
    
   def temp_model(self):
@@ -328,6 +384,7 @@ class TempModels:
     return model
   
   
+  
   def train_test(self):
     '''
     This function takes the dataset and splits them into a train and test split. The test split is 
@@ -338,7 +395,7 @@ class TempModels:
     '''
     
     #get isolated region data along with the respective mlt values
-    iso_img_arr, mlt_arr = self.prep_region_data()
+    iso_img_arr, mlt_arr, quadrant_mean, quadrant_img = self.prep_region_data()
     
     
     N = len(mlt_arr)  # length of sample used
@@ -367,7 +424,14 @@ class TempModels:
     test_mlt = mlt_arr[test_indices]
     test_iso = iso_img_arr[test_indices]
     
-    del iso_img_arr, mlt_arr
+    train_quad_mean = quadrant_mean[train_indices]
+    test_quad_mean = quadrant_mean[test_indices]
+    
+    train_quad_img = quadrant_img[train_indices]
+    test_quad_img = quadrant_img[test_indices]
+    
+    
+    del iso_img_arr, mlt_arr, quadrant_mean, quadrant_img
     
     #get temperature map data
     temp_arr = np.array((list(self.prep_tempdata())), dtype = float)
@@ -414,6 +478,10 @@ class TempModels:
     'test_mlt': test_mlt,
     'train_iso': train_iso,
     'test_iso': test_iso,
+    'train_quad': train_quad_img,
+    'test_quad': test_quad_img,
+    'train_quad_mean': train_quad_mean,
+    'test_quad_mean': test_quad_mean,
     'train_station_mlt': train_station_mlt,
     'test_station_mlt': test_station_mlt,
     'train_target': train_target,
@@ -431,7 +499,14 @@ class TempModels:
 
   
   
-  def run_models(self, train_iso, train_mlt, train_temp, train_station_mlt,train_target):
+  def run_models(self, 
+                 train_iso, train_mlt, train_temp, 
+                 train_station_mlt,train_quad, 
+                 train_quad_mean, train_target,
+                 region_model: bool = True,
+                 temp_model: bool = True, 
+                 Four_Quadrants: bool = True
+                 ):
     
     '''
     Run the Models. 
@@ -448,34 +523,65 @@ class TempModels:
         None 
     '''
     
-    #call the models
-    model_iso = self.region_model()
-    model_temp = self.temp_model()
+
     
     early_stopping = EarlyStopping(
                       monitor='val_loss',  # Metric to monitor (usually validation loss)
                       patience=10,          # Number of epochs with no improvement after which training will stop
                       verbose=2,            # Print messages about early stopping
                       restore_best_weights=True) # Restore the best model weights when training stops
-                      
+    
+    if region_model: 
+      #call the model
+      model_iso = self.region_model()
 
-    #fit the models 
-    model_iso.fit([train_iso, train_mlt, train_station_mlt], train_target, 
-                  verbose = 2, validation_split = 0.2, 
-                  batch_size = 16, shuffle = True,
-                  callbacks = [early_stopping])
+      #fit the models 
+      model_iso.fit([train_iso, train_mlt, train_station_mlt], train_target, 
+                    verbose = 2, validation_split = 0.2, 
+                    batch_size = 16, shuffle = True,
+                    callbacks = [early_stopping])
+      
+      #save the model 
+      model_iso.save(os.path.join(self.path, f'{self.station}_iso_model.h5'))
+      
+      
+    if temp_model:
+      
+      #call the model 
+      model_temp = self.temp_model()
+      
+      
+      model_temp.fit(train_temp, train_target, 
+                     verbose = 2, validation_split = 0.2, 
+                     batch_size = 16, shuffle = True,
+                     callbacks = [early_stopping])
     
+      #Save the model
+      model_temp.save(os.path.join(self.path, f'{self.station}_temp_model.h5'))
+      
+    if Four_Quadrants:
+      
+      #call the model 
+      model_fourQuadrants = self.Four_Qudrants()
+      
+      
+      model_fourQuadrants.fit([train_quad, train_quad_mean], train_target, 
+                     verbose = 2, validation_split = 0.2, 
+                     batch_size = 16, shuffle = True,
+                     callbacks = [early_stopping])
     
-    model_temp.fit(train_temp, train_target, 
-                   verbose = 2, validation_split = 0.2, 
-                   batch_size = 16, shuffle = True,
-                   callbacks = [early_stopping])
-    
-    #save the models 
-    model_iso.save(os.path.join(self.path, f'{self.station}_iso_model.h5'))
-    model_temp.save(os.path.join(self.path, f'{self.station}_temp_model.h5'))
+      #Save the model
+      model_fourQuadrants.save(os.path.join(self.path, f'{self.station}_4_Quadrants.h5'))
+
+
         
-  def model_eval(self, test_iso, test_mlt, test_temp, test_station_mlt, test_target):
+  def model_eval(self, test_iso, 
+                 test_mlt, test_temp, 
+                 test_station_mlt, test_quad, 
+                 test_quad_mean, test_target, 
+                 region_model: bool = True,
+                 temp_model: bool = True, 
+                 Four_Quadrants: bool = True):
     '''
     Evaluate the models and compare with the actual test values. 
     
@@ -495,57 +601,98 @@ class TempModels:
     
     #load models
     iso_model =load_model(os.path.join(self.path, f'{self.station}_iso_model.h5'))
-    temp_model = load_model(os.path.join(self.path, f'{self.station}_temp_model.h5'))
-    
-    #make predictions 
-    predicted_iso = iso_model.predict([test_iso, test_mlt])
-    predicted_temp = temp_model.predict(test_temp)
-    
-    # Calculate evaluation metrics for the second model
-    rmse_model1 = np.sqrt(mean_squared_error(test_target, predicted_temp))
-    mae_model1 = mean_absolute_error(test_target, predicted_temp)
-    
-    
-    rmse_model2 = np.sqrt(mean_squared_error(test_target, predicted_iso))
-    mae_model2 = mean_absolute_error(test_target, predicted_iso)
 
+    
+    if region_model:
+      iso_model =load_model(os.path.join(self.path, f'{self.station}_iso_model.h5'))
+      
+      #make predictions 
+      predicted_iso = iso_model.predict([test_iso, test_mlt])
+      
+      rmse_iso = np.sqrt(mean_squared_error(test_target, predicted_iso))
+      mae_iso = mean_absolute_error(test_target, predicted_iso)
+      
+      
+      fig, ax1 = plt.subplots(1, 1, figsize=(15, 15))  # Change the subplot layout to (2, 1)
+      # Plot for the second model evaluation
+      ax1.plot(test_target, label='Actual Values', color='blue')
+      ax1.plot(predicted_iso, label='Predicted Values', color='green')
+      ax1.set_title('Model 2: Actual vs. Predicted for ENA and MLT Based Model')
+      ax1.set_xlabel('Data Points')
+      ax1.set_ylabel('DB/DT')
+      ax1.grid(True)
+      ax1.margins(x=0)
+      ax1.legend(loc='upper left')
+      
+      legend_x, legend_y, _, _ = ax1.get_legend().get_bbox_to_anchor().bounds
+      ax1.text(0.8, 0.95, f'RMSE: {rmse_iso:.2f}', transform=ax1.transAxes, color='red')
+      ax1.text(0.8, 0.9, f'MAE: {mae_iso:.2f}', transform=ax1.transAxes, color='red')
+      
+      # Save the figure
+      plt.savefig(os.path.join(self.path, f'{self.station}_iso_model.png'))
+      
+      
+      
+    if temp_model:
+      #load model
+      temp_model = load_model(os.path.join(self.path, f'{self.station}_temp_model.h5'))
+      
+      #make predictions
+      predicted_temp = temp_model.predict(test_temp)
+      
+      # Calculate evaluation metrics for the second model
+      rmse_temp = np.sqrt(mean_squared_error(test_target, predicted_temp))
+      mae_temp = mean_absolute_error(test_target, predicted_temp)
+         
+      fig, ax1 = plt.subplots(1, 1, figsize=(15, 15))  # Change the subplot layout to (2, 1)
+    
+      # Plot for the first model evaluation
+      ax1.plot(test_target, label='Actual Values', color='blue')
+      ax1.plot(predicted_temp, label='Predicted Values', color='green')
+      ax1.set_title('Model 1: Actual vs. Predicted For ENA based Model')
+      ax1.set_xlabel('Data Points')
+      ax1.set_ylabel('DB/DT')
+      ax1.grid(True)
+      ax1.margins(x=0)
+      ax1.legend(loc='upper left')
+      
+      legend_x, legend_y, _, _ = ax1.get_legend().get_bbox_to_anchor().bounds
+      ax1.text(0.8, 0.95, f'RMSE: {rmse_temp:.2f}', transform=ax1.transAxes, color='red')
+      ax1.text(0.8, 0.9, f'MAE: {mae_temp:.2f}', transform=ax1.transAxes, color='red')
+      
+      # Save the figure
+      plt.savefig(os.path.join(self.path, f'{self.station}_temp_model.png'))
+      
+    if Four_Quadrants:
+      
+      #load model
+      quad_model = load_model(os.path.join(self.path, f'{self.station}_4_Quadrants.h5'))
+      
+      #make predictions
+      
+      predicted_quad = quad_model.predict([test_quad, test_quad_mean])
+      
+      rmse_quad = np.sqrt(mean_squared_error(test_target, predicted_quad))
+      mae_quad = mean_absolute_error(test_target, predicted_quad)
+      
+      fig, ax1 = plt.subplots(1,1, figsize = (15,15))
+      # Plot for the first model evaluation
+      ax1.plot(test_target, label='Actual Values', color='blue')
+      ax1.plot(predicted_quad, label='Predicted Values', color='green')
+      ax1.set_title('Model 3: Actual vs. Predicted For ENA Quadrants Model')
+      ax1.set_xlabel('Data Points')
+      ax1.set_ylabel('DB/DT')
+      ax1.grid(True)
+      ax1.margins(x=0)
+      ax1.legend(loc='upper left')
+      
+      legend_x, legend_y, _, _ = ax1.get_legend().get_bbox_to_anchor().bounds
+      ax1.text(0.8, 0.95, f'RMSE: {rmse_quad:.2f}', transform=ax1.transAxes, color='red')
+      ax1.text(0.8, 0.9, f'MAE: {mae_quad:.2f}', transform=ax1.transAxes, color='red')
 
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 15))  # Change the subplot layout to (2, 1)
-    
-    # Plot for the first model evaluation
-    ax1.plot(test_target, label='Actual Values', color='blue')
-    ax1.plot(predicted_temp, label='Predicted Values', color='green')
-    ax1.set_title('Model 1: Actual vs. Predicted For ENA based Model')
-    ax1.set_xlabel('Data Points')
-    ax1.set_ylabel('DB/DT')
-    ax1.grid(True)
-    ax1.margins(x=0)
-    ax1.legend(loc='upper left')
-    
-    legend_x, legend_y, _, _ = ax1.get_legend().get_bbox_to_anchor().bounds
-    ax1.text(0.8, 0.95, f'RMSE: {rmse_model1:.2f}', transform=ax1.transAxes, color='red')
-    ax1.text(0.8, 0.9, f'MAE: {mae_model1:.2f}', transform=ax1.transAxes, color='red')
-    
-    # Plot for the second model evaluation
-    ax2.plot(test_target, label='Actual Values', color='blue')
-    ax2.plot(predicted_iso, label='Predicted Values', color='green')
-    ax2.set_title('Model 2: Actual vs. Predicted for ENA and MLT Based Model')
-    ax2.set_xlabel('Data Points')
-    ax2.set_ylabel('DB/DT')
-    ax2.grid(True)
-    ax2.margins(x=0)
-    ax2.legend(loc='upper left')
-    
-    legend_x, legend_y, _, _ = ax2.get_legend().get_bbox_to_anchor().bounds
-    ax2.text(0.8, 0.95, f'RMSE: {rmse_model2:.2f}', transform=ax2.transAxes, color='red')
-    ax2.text(0.8, 0.9, f'MAE: {mae_model2:.2f}', transform=ax2.transAxes, color='red')
-    
-    # Adjust spacing between subplots
-    plt.tight_layout()
-    
-    # Save the figure
-    plt.savefig(os.path.join(self.path, f'{self.station}_model_evaluations.png'))
+      
+      # Save the figure
+      plt.savefig(os.path.join(self.path, f'{self.station}_quad_model.png'))
     
 
         
@@ -572,6 +719,8 @@ if __name__ == "__main__":
       train_mlt = data['train_mlt']
       train_target = data['train_target']
       train_station_mlt = data['train_station_mlt']
+      train_quad = data['train_quad']
+      train_quad_mean = data['train_quad_mean']
       
   
 
@@ -580,18 +729,20 @@ if __name__ == "__main__":
       test_mlt = data['test_mlt']
       test_target = data['test_target']
       test_station_mlt = data['test_station_mlt']
+      test_quad = data['test_quad']
+      test_quad_mean = data['test_quad_mean']
       
 
         
       # Train models
-      temp_models.run_models(train_iso, train_mlt, train_temp, train_target)
+      temp_models.run_models(train_iso, train_mlt, train_temp, train_quad, train_quad_mean, train_target)
   
   
       # Evaluate models
-      temp_models.model_eval(test_iso, test_mlt, test_temp, test_target)
+      temp_models.model_eval(test_iso, test_mlt, test_temp, test_quad, test_quad_mean, test_target)
           
-      del train_iso, train_temp, train_mlt, train_target
-      del test_iso, test_temp, test_mlt, test_target 
+      del train_iso, train_temp, train_mlt, train_target, train_quad, train_quad_mean
+      del test_iso, test_temp, test_mlt, test_target, test_quad, test_quad_mean
       
       gc.collect()
         
@@ -606,24 +757,30 @@ if __name__ == "__main__":
       train_mlt = data['train_mlt']
       train_target = data['train_target']
       train_station_mlt = data['train_station_mlt']
+      train_quad = data['train_quad']
+      train_quad_mean = data['train_quad_mean']
       
+  
+
       test_iso = data['test_iso']
       test_temp = data['test_temp']
       test_mlt = data['test_mlt']
       test_target = data['test_target']
       test_station_mlt = data['test_station_mlt']
+      test_quad = data['test_quad']
+      test_quad_mean = data['test_quad_mean']
       
 
         
       # Train models
-      temp_models.run_models(train_iso, train_mlt, train_temp, train_station_mlt, train_target)
+      temp_models.run_models(train_iso, train_mlt, train_temp, train_quad, train_quad_mean, train_target)
   
   
       # Evaluate models
-      temp_models.model_eval(test_iso, test_mlt, test_temp, test_station_mlt, test_target)
+      temp_models.model_eval(test_iso, test_mlt, test_temp, test_quad, test_quad_mean, test_target)
           
-      del train_iso, train_temp, train_mlt, train_target, train_station_mlt
-      del test_iso, test_temp, test_mlt, test_target, test_station_mlt
+      del train_iso, train_temp, train_mlt, train_target, train_quad, train_quad_mean
+      del test_iso, test_temp, test_mlt, test_target, test_quad, test_quad_mean
       
       gc.collect() 
         

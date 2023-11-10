@@ -4,7 +4,20 @@
 Created on Thu Aug 31 00:40:58 2023
 
 @author: tadewuyi
+
+
+This is a prep file for the TWINS ENA dataset. The TWINS ENA dataset is a set of images of the temperature
+of the magnetotial at a given time. The temperature of the energectic neutral atoms (ENAs) in the magnetotail
+is used as a proxy for observing the dynamics of the magnetotail without having to rely on in-situ measurements
+fro various spacecrafts. 
 """
+
+import sys 
+
+sys.path.append('../Cannonical-Correlation/')
+
+from Region_Extraction import pieslice
+
 import spacepy.pycdf as cdf
 import pandas as pd 
 import numpy as np
@@ -16,14 +29,16 @@ from math import pi, atan2
 from collections import defaultdict
 import datetime as dt
 from tqdm import tqdm
+import re
+
 
 
 class DataProcessor:
   def __init__(self, 
                station,
                path: str = '../data/Prepped_data/',
-               temp_path: str ='../data/TWINS/',
-               SM_path: str = '../data/SuperMag/',
+               temp_path: str ='/data/twins/CDF_files',
+               SM_path: str = '../../../data/supermag/',
                img_center: tuple = (40,0),
                threshold: int = 3,
                min_size: int = 100,
@@ -52,13 +67,32 @@ class DataProcessor:
     self.img_center = img_center
     
     
+  def natural_sort_key(self, string):
+    '''
+    Key function for sorting files naturally.
+    Parameters:
+        - s: File name.
+    Returns:
+        - Key for natural sorting.
+    '''
     
+    # Split the input string into text and numeric parts
+    parts = re.split(r'(\d+)', string)
+  
+    # Convert numeric parts to integers for proper numeric sorting
+    parts[1::2] = map(int, parts[1::2])
+  
+    return parts
+  
     
   def prep_data(self) -> None:
     '''
     This function takes in .feather files for  the supermag data and the Energetic Neutral Atoms (ENA) files and 
     creates a dictionary output. The ENA files are filled with 10 minutes cadence images and the images are stored
-    in the dictionary with the key being the corresponding time.
+    in the dictionary with the key being the corresponding time. The supermag station file is used to figure out 
+    the appropriate time step to keep based on the availability of the specific station. 
+    For example, 'NEW' station might not have data at time T, therefore temperature maps from time T isn't kept 
+    as a part of the training dataset.
     
     Parameter:
       ---------
@@ -70,9 +104,11 @@ class DataProcessor:
         -------
         None 
     '''
+    
+    
     image = [img for img in os.listdir(self.temp_path)]
     
-    image.sort()
+    image = sorted(image, key = self.natural_sort_key)
     
     #Create empty dictionary and list to append the returned values 
     temp_dict = {}
@@ -91,42 +127,47 @@ class DataProcessor:
         if i == 0:
           temp_data = temp_arr[i]
           
-          temp_data[temp_data == -1] = 0
+          temp_data[temp_data == -1] = 0 #set all the -1 in the temperature maps into 0. 
           norm_temp = temp_data/np.max(temp_data) #normalized temperature map. 
           
+          #load the SuperMAG station data
           df = pd.read_feather(os.path.join(self.SM_path, f'{self.station}.feather'))
-#          df_cleaned = df.dropna()
-          
-#          del df
-          
+
+          #Find the time index that corresponds to the ith time index from the TWINS data.
           time_index = bisect.bisect_left(df['Date_UTC'], (epoch[i] + dt.timedelta(minutes = 10)))
           
-  
-          SM_time = df['Date_UTC'][time_index]
-          time_diff = (SM_time - epoch[i]).total_seconds()
           
-          dbht = df['dbht'][time_index]
-          mlt = df['MLT'][time_index]
+          SM_time = df['Date_UTC'][time_index] #define the SuperMAG time
+          time_diff = (SM_time - epoch[i]).total_seconds() #Define the time difference between SM and TWINS
           
+          dbht = df['dbht'][time_index] #Define the datapoint of interest
+          mlt = df['MLT'][time_index] #Get the MLT value as well. 
+          
+          
+          #condition to make sure the time diffrence isn't huge, and a measurement was taken at that time.
           if not np.isnan(dbht) and time_diff < 900:
-      
+            
+            
+            #Keep the first map is all is met, and append its corresponding target data to the list.
             temp_dict[SM_time] = norm_temp
-            target_data.append([SM_time,dbht, mlt])
+            target_data.append([SM_time, dbht, mlt])
           
         else:
           diff = abs((epoch[i] - epoch[i-1]).total_seconds())
           if diff > 120:
+            
+            '''
+            Same step as the one above, but for i != 0. The if statement makes sure that 
+            the maps being loaded are
+            '''
             temp_data = temp_arr[i]
             
-            temp_data[temp_data == -1] = 0
+            temp_data[temp_data == -1] = 0 #set all the -1 in the temperature maps into 0. 
             norm_temp = temp_data/np.max(temp_data) #normalized temperature map. 
             
             df = pd.read_feather(os.path.join(self.SM_path, f'{self.station}.feather'))
             
-#            df_cleaned = df.dropna() #Drop the rows that contains nan values 
-            
-#            del df #delete the unneeded dataframe
-            
+
             time_index = bisect.bisect_left(df['Date_UTC'], (epoch[i] + dt.timedelta(minutes = 10)))
             
     
@@ -178,7 +219,7 @@ class DataProcessor:
     
     isolated_regions = []
     
-    for label in tqdm(range(1, labels.max() + 1), desc = 'Working on Isolated regions...'):
+    for label in range(1, labels.max() + 1):
         region = (labels == label)
         region_size = np.sum(region)
     
@@ -189,6 +230,17 @@ class DataProcessor:
             isolated_regions.append(isolated_region)
     
     return isolated_regions 
+  
+
+  
+  def quad_imgs(self, image):
+    '''
+    Takes in temperature maps and splits them into 4 quadrants. Returns a list of images.
+    Also returns the average of each slice generated along with other engineered features desired. 
+    '''
+    mean, four_imgs = pieslice(image, angle_steps = 4)
+    
+    return mean, four_imgs
     
     
   def MLT(self, coordinates: tuple)-> float:
@@ -231,28 +283,41 @@ class DataProcessor:
     exists and then parses it into the extract_features function to get the isolated features required for analysis.
     If the extracted feature file already exists, then the function aborts. 
     '''
+   
+    #Load the temperature maps dictionary.
+    dict_path = os.path.join(self.path, f'{self.station}_temp_dict.pkl') #Path to the temperature dictionary need in this function.
     
+    if os.path.isfile(dict_path):
+      
+      with open(dict_path, 'rb') as file:
+        temperature_data = pickle.load(file) #Open the temp dictionary if it already exists.
+        
+    else:
+      self.prep_data()
+      
+      with open(dict_path, 'rb') as file:
+        temperature_data = pickle.load(file)
+    
+    
+    
+    '''
+    Get the isolated regions from the temperature maps. 
+    Temperature map data dictionary is opened and each image value in the dictionary 
+    is put through into the extract_features function. This returns a dictionary with a key
+    and a subkey. The main key is the timestamp of the temperature maps, while the sub keys is 'MLT'
+    and 'images'.
+    '''
+    #define the path for the isolated regions images
     region_path = os.path.join(self.path, f'{self.station}_region_data.pkl')
     
     if os.path.isfile(region_path):
-      raise ValueError('The file already exists!')#This stops the class if the output file already exists. 
+      print('Region file already exists!')#This stops the function if the file already exists. 
       
     else:
       
       extract_dict = defaultdict(dict)
       
-      dict_path = os.path.join(self.path, f'{self.station}_temp_dict.pkl') #Path to the temperature dictionary need in this function.
-      
-      if os.path.isfile(dict_path):
-        
-        with open(dict_path, 'rb') as file:
-          temperature_data = pickle.load(file) #Open the temp dictionary if it already exists.
-          
-      else:
-        self.prep_data()
-        
-        with open(dict_path, 'rb') as file:
-          temperature_data = pickle.load(file)
+
           
       for key, value in tqdm(temperature_data.items(), desc = 'Getting MLT value for Isolated regions...'):
         
@@ -281,7 +346,32 @@ class DataProcessor:
         
       with open(os.path.join(self.path, f'{self.station}_region_data.pkl'), 'wb') as f:
         pickle.dump(extract_dict, f)
-  
+      
+      
+    '''
+    Create a list of four images from the temperature maps. Each image in the list represents one part of 
+    the temperature map quadrants. Along with the images, the pieslilce function also returns the average value
+    of each image in the four images returned. Store the data generated in a dictionary
+    '''
+    #define the path for the pieslice images
+    pieslice_path = os.path.join(self.path, f'{self.station}_pieslice_data.pkl')
+    
+    if os.path.isfile(pieslice_path):
+      print('Pie Slice file already exists!')#This stops the function if the file already exists. 
+      
+    else:
+      
+      pieslice_dict = defaultdict(dict)#initialize the dictionary to store the images
+      
+      for key, value in tqdm(temperature_data.items(), desc = 'Getting the four quadrant images...'):
+        mean, imgs = self.quad_imgs(value) #Get the images and mean values from the pieslice function
+        pieslice_dict[key]['mean'] = mean #store the mean in a subkey in the dictionary
+        pieslice_dict[key]['image'] = imgs #store the images in a subkey in the dictionary
+       
+      with open(os.path.join(self.path, f'{self.station}_pieslice_data.pkl'), 'wb') as f:
+        pickle.dump(pieslice_dict, f)
+      
+        
 
 if __name__ == '__main__':
   
